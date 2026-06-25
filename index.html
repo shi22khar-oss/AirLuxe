@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Air Canvas - Gesture Blackboard</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        :root {
+            --primary: #00ffcc;
+            --bg-dark: #121214;
+            --panel-bg: rgba(22, 22, 26, 0.85);
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-dark);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            user-select: none;
+        }
+
+        /* The Mirror Webcam Feed (Kept in background, semi-transparent) */
+        #webcam {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirroring makes natural hand coordination possible */
+            opacity: 0.15;
+            z-index: 1;
+        }
+
+        /* The Master Drawing Canvas Layer */
+        #paintCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 2;
+            cursor: none;
+        }
+
+        /* UI Control Dashboard Panel */
+        .dashboard {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--panel-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 12px 24px;
+            border-radius: 50px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            z-index: 10;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        .status-badge {
+            color: #fff;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        /* Interactive Color Palette indicators */
+        .palette {
+            display: flex;
+            gap: 10px;
+        }
+
+        .color-swatch {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            border: 2px solid transparent;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .color-swatch.active {
+            border-color: #fff;
+            transform: scale(1.15);
+            box-shadow: 0 0 10px rgba(255,255,255,0.2);
+        }
+
+        /* Floating Custom Laser Cursor */
+        #laser-pointer {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: transparent;
+            border: 2px solid #fff;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 9999;
+            box-shadow: 0 0 10px var(--primary);
+            transition: width 0.1s, height 0.1s, background-color 0.1s;
+        }
+    </style>
+</head>
+<body>
+
+    <video id="webcam" autoplay playsinline></video>
+    
+    <canvas id="paintCanvas"></canvas>
+
+    <div class="dashboard">
+        <div id="gestureStatus" class="status-badge">System Initializing...</div>
+        <div class="palette">
+            <div class="color-swatch active" style="background: #00ffcc;" data-color="#00ffcc"></div>
+            <div class="color-swatch" style="background: #ff3366;" data-color="#ff3366"></div>
+            <div class="color-swatch" style="background: #ffcc00;" data-color="#ffcc00"></div>
+            <div class="color-swatch" style="background: #ffffff;" data-color="#ffffff"></div>
+        </div>
+    </div>
+
+    <div id="laser-pointer"></div>
+
+    <script>
+        /**
+         * SENIOR ARCHITECT NOTES & CORE CONFIGURATIONS
+         * -------------------------------------------------------------
+         * Architectural Design: Modular event architecture extracting spatial vectors 
+         * directly from local computer vision context to generate low-latency web canvas updates.
+         */
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('paintCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusDisplay = document.getElementById('gestureStatus');
+        const pointer = document.getElementById('laser-pointer');
+
+        // App Engine Reactive Global Configuration State
+        let activeColor = '#00ffcc';
+        let brushSize = 5;
+        let lastX = null;
+        let lastY = null;
+        
+        // Anti-jitter historical array buffer for positional smoothing (Exponential Moving Average approximation)
+        const filterWeight = 0.4; // Balance scale between low-latency input (1.0) and ultra-smooth tracking (0.05)
+        let smoothedX = 0;
+        let smoothedY = 0;
+
+        // Dynamic viewport resize configuration to ensure precise pixel mapping
+        function optimizeCanvasBoundaries() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            // Canvas configuration resets after mutation, re-inject baseline specs
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+        }
+        window.addEventListener('resize', optimizeCanvasBoundaries);
+        optimizeCanvasBoundaries();
+
+        // Bind interactive event handlers to UI Palette Swatches
+        document.querySelectorAll('.color-swatch').forEach(swatch => {
+            swatch.addEventListener('click', (e) => {
+                document.querySelector('.color-swatch.active').classList.remove('active');
+                swatch.classList.add('active');
+                activeColor = swatch.getAttribute('data-color');
+                document.documentElement.style.setProperty('--primary', activeColor);
+            });
+        });
+
+        /**
+         * EUCLIDEAN DISTANCE ALGORITHM
+         * Calculates 3D distance between landmarks to evaluate structural states (e.g., finger closures)
+         */
+        function calculateDistance(pt1, pt2) {
+            return Math.sqrt(
+                Math.pow(pt1.x - pt2.x, 2) + 
+                Math.pow(pt1.y - pt2.y, 2) + 
+                Math.pow(pt1.z - pt2.z, 2)
+            );
+        }
+
+        /**
+         * INTERACTIVE GESTURE PROCESSOR ENGINE
+         * Evaluates hand array spatial patterns to map active canvas operations
+         */
+        function processHandGestures(results) {
+            // Early exit safeguard when hand profile registers null within frame
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+                statusDisplay.innerText = "No Hand Detected";
+                pointer.style.backgroundColor = 'transparent';
+                lastX = null; // Break path chain continuity when hand drops out of matrix view
+                return;
+            }
+
+            const hand = results.multiHandLandmarks[0];
+
+            // Extract specific spatial landmark arrays
+            const wrist = hand[0];
+            const thumbTip = hand[4];
+            const indexTip = hand[8];
+            const middleTip = hand[12];
+            const ringTip = hand[16];
+            const pinkyTip = hand[20];
+
+            // 1. Position Transformation & Mapping Strategy (Flipped x coordinates coordinate for user mirror orientation tracking)
+            const targetRawX = (1 - indexTip.x) * window.innerWidth;
+            const targetRawY = indexTip.y * window.innerHeight;
+
+            // 2. Exponential Smoothing Application to eliminate raw hardware sensor jitter
+            smoothedX = (targetRawX * filterWeight) + (smoothedX * (1 - filterWeight));
+            smoothedY = (targetRawY * filterWeight) + (smoothedY * (1 - filterWeight));
+
+            // Sync visual laser indicator coordinates
+            pointer.style.left = `${smoothedX}px`;
+            pointer.style.top = `${smoothedY}px`;
+
+            // 3. Distance Metrics formulation for algorithmic structural analysis
+            const indexToMiddleDist = calculateDistance(indexTip, middleTip);
+            const handSpanRadius = calculateDistance(wrist, middleTip); // Used to normalize dynamic depth scale variations
+
+            // Gesture State Determinations
+            const isMiddleFingerExtended = middleTip.y < hand[10].y; 
+            const isRingFingerExtended = ringTip.y < hand[14].y;
+            const isPinkyFingerExtended = pinkyTip.y < hand[18].y;
+
+            /**
+             * STATE EVALUATION PARSER PIPELINE
+             */
+            
+            // STATE A: DETONATE TOTAL ERASE EVENT -> Full Palm Extended
+            if (isMiddleFingerExtended && isRingFingerExtended && isPinkyFingerExtended && (indexToMiddleDist > handSpanRadius * 0.25)) {
+                statusDisplay.innerText = "💥 Clear Canvas Mode";
+                pointer.style.width = '40px';
+                pointer.style.height = '40px';
+                pointer.style.backgroundColor = 'rgba(255, 51, 102, 0.5)';
+                
+                // Clear render viewport context instantly
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                lastX = null;
+            }
+            // STATE B: HOVER/NAVIGATION MODE -> Index + Middle Extended Together
+            else if (isMiddleFingerExtended && (indexToMiddleDist < handSpanRadius * 0.25)) {
+                statusDisplay.innerText = "✈️ Navigation Mode";
+                pointer.style.width = '20px';
+                pointer.style.height = '20px';
+                pointer.style.backgroundColor = 'rgba(255, 255, 255, 0.4)';
+                
+                lastX = null; // Decouple vector references to halt drawing path sequences
+            }
+            // STATE C: ACTIVE DRAW MODE -> Only Index Extended 
+            else {
+                statusDisplay.innerText = "✍️ Write Mode";
+                pointer.style.width = '12px';
+                pointer.style.height = '12px';
+                pointer.style.backgroundColor = activeColor;
+
+                // Handle draw matrix updates
+                if (lastX !== null && lastY !== null) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = activeColor;
+                    ctx.lineWidth = brushSize;
+                    ctx.moveTo(lastX, lastY);
+                    ctx.lineTo(smoothedX, smoothedY);
+                    ctx.stroke();
+                }
+                
+                // Store structural values for sequence iteration
+                lastX = smoothedX;
+                lastY = smoothedY;
+            }
+        }
+
+        /**
+         * KERNEL ENGINE INITIALIZATION
+         */
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1, // 1 Balanced performance footprint across smart consumer systems
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        // Register tracking loop callback handling
+        hands.onResults(processHandGestures);
+
+        // Access and instantiate native user hardware capture hardware layer
+        const camera = new Camera(video, {
+            onFrame: async () => {
+                await hands.send({ image: video });
+            },
+            width: 640,
+            height: 480
+        });
+
+        camera.start()
+            .then(() => {
+                statusDisplay.innerText = "System Active: Raise Hand";
+            })
+            .catch(err => {
+                statusDisplay.innerText = "Hardware initialization block detected.";
+                console.error("Camera runtime error:", err);
+            });
+    </script>
+</body>
+</html>
