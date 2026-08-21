@@ -38,9 +38,13 @@ If the camera is unavailable, the app automatically falls back to mouse/touch
 
 ## Deployment (GitHub Pages)
 
-Deployment is automatic: any push to `arena/01a024b4-airluxe` (or `main`) runs
-`.github/workflows/deploy-pages.yml` and publishes the repo root via GitHub Pages
-(requires the Pages source set to **GitHub Actions** in repo settings).
+The live site is published from the repo root at
+https://shi22khar-oss.github.io/AirLuxe/ (GitHub Pages, `main` branch).
+Changes are landed via pull request — merging a PR to `main` redeploys automatically.
+
+An optional Actions-based pipeline is also included at
+`.github/workflows/deploy-pages.yml`; to use it, set the Pages source to
+**GitHub Actions** in the repo settings (Settings → Pages).
 
 ## Local development
 
